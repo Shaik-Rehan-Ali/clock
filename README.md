@@ -9,9 +9,14 @@ A responsive clock suite with automatic location detection on phones and manual 
 - Phone: asks for geolocation permission
 - Desktop/laptop: manual city/location input by default
 - Alarm tab with labels, repeat days, and notifications
+- Alarm tab with labels, repeat days, and edit support
+- Dedicated tagged Timer tab with On/Off, Edit, and Remove actions
 - Stopwatch with lap tracking
-- Sleep timer with notification + vibration/tone alerts
+- Sleep timer with full 24-hour duration selection (HH:MM style)
+- 10 authentic synthesized ringtones: Pulse, Chime, Beacon, Rooster, Beat Plucker, Morning Glory, Apex, Digital Phone, Classic Clock, Alarm 2010
+- Custom ringtone upload with app-aware storage (IndexedDB for installed PWA, session storage for browser)
 - World clock tab with saved cities
+- Developer tab with creator profile details
 - Installable PWA support for phone and desktop browsers
 
 ## Run Locally

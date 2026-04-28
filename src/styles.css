@@ -35,7 +35,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -147,7 +148,7 @@ h1 {
 
 .tabs {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 12px;
   max-width: 1360px;
   margin: 0 auto 22px;
@@ -362,13 +363,47 @@ input {
   outline: none;
 }
 
+select {
+  width: 100%;
+  border: 1px solid rgba(180, 200, 255, 0.16);
+  border-radius: 16px;
+  background: rgba(7, 11, 22, 0.86);
+  color: var(--text);
+  padding: 14px 16px;
+  outline: none;
+}
+
 input:focus {
+  border-color: rgba(124, 247, 212, 0.5);
+  box-shadow: 0 0 0 4px rgba(124, 247, 212, 0.08);
+}
+
+select:focus {
   border-color: rgba(124, 247, 212, 0.5);
   box-shadow: 0 0 0 4px rgba(124, 247, 212, 0.08);
 }
 
 input[type='range'] {
   padding: 0;
+}
+
+input[type='file'] {
+  padding: 10px;
+}
+
+.time-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.time-picker-row input {
+  max-width: 110px;
+}
+
+.time-picker-row span {
+  color: var(--muted);
+  font-weight: 700;
 }
 
 .range-label {
@@ -521,7 +556,7 @@ input[type='range'] {
   }
 
   .tabs {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .info-panel {

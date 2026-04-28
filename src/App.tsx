@@ -1,9 +1,22 @@
-import { useEffect, useRef, useState } from 'react';
+import { ChangeEvent, useEffect, useRef, useState } from 'react';
 import tzlookup from 'tz-lookup';
+import { playRingtone, ringtoneList } from './ringtones';
 
-type TabKey = 'clock' | 'alarms' | 'stopwatch' | 'sleep' | 'world' | 'settings';
+type TabKey = 'clock' | 'alarms' | 'timer' | 'stopwatch' | 'sleep' | 'world' | 'settings' | 'developer';
 type DeviceKind = 'phone' | 'computer';
 type LocationSource = 'automatic' | 'manual';
+type RingtoneChoice =
+  | 'pulse'
+  | 'chime'
+  | 'beacon'
+  | 'rooster'
+  | 'beat-plucker'
+  | 'morning-glory'
+  | 'apex'
+  | 'digital-phone'
+  | 'classic-clock'
+  | 'alarm-2010'
+  | 'custom';
 
 type SavedLocation = {
   id: string;
@@ -20,6 +33,15 @@ type Alarm = {
   repeatDays: number[];
   enabled: boolean;
   lastTriggered: string | null;
+};
+
+type TaggedTimer = {
+  id: string;
+  label: string;
+  durationMinutes: number;
+  remainingMs: number;
+  active: boolean;
+  endsAt: number | null;
 };
 
 type StopwatchLap = {
@@ -47,20 +69,87 @@ type ClockParts = {
 const tabs: Array<{ key: TabKey; label: string; hint: string }> = [
   { key: 'clock', label: 'Clock', hint: 'Live time' },
   { key: 'alarms', label: 'Alarm', hint: 'Wake-ups' },
+  { key: 'timer', label: 'Timer', hint: 'Tagged timers' },
   { key: 'stopwatch', label: 'Stopwatch', hint: 'Track time' },
-  { key: 'sleep', label: 'Sleep', hint: 'Timer' },
+  { key: 'sleep', label: 'Sleep', hint: '24h timer' },
   { key: 'world', label: 'World', hint: 'Cities' },
-  { key: 'settings', label: 'Settings', hint: 'Device & location' },
+  { key: 'settings', label: 'Settings', hint: 'Device & sound' },
+  { key: 'developer', label: 'Developer', hint: 'Creator' },
 ];
 
 const weekdayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const storageKeys = {
   alarms: 'pulse-clock-alarms',
+  timers: 'pulse-clock-tagged-timers',
   worlds: 'pulse-clock-worlds',
   settings: 'pulse-clock-settings',
 };
 
 const pad = (value: number) => String(value).padStart(2, '0');
+
+function isAppInstalled(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+  // Check for PWA standalone mode
+  const isStandalone = (navigator as unknown as { standalone?: boolean }).standalone === true;
+  const isInFullscreen = window.matchMedia('(display-mode: standalone)').matches;
+  return isStandalone || isInFullscreen;
+}
+
+async function openIndexedDB(): Promise<IDBDatabase | null> {
+  try {
+    return new Promise((resolve, reject) => {
+      if (!window.indexedDB) {
+        resolve(null);
+        return;
+      }
+      const request = indexedDB.open('pulse-clock-db', 1);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+      request.onupgradeneeded = (event) => {
+        const db = (event.target as IDBOpenDBRequest).result;
+        if (!db.objectStoreNames.contains('ringtones')) {
+          db.createObjectStore('ringtones', { keyPath: 'id' });
+        }
+      };
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function saveCustomRingtoneToIDB(id: string, blob: Blob): Promise<boolean> {
+  try {
+    const db = await openIndexedDB();
+    if (!db) return false;
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(['ringtones'], 'readwrite');
+      const store = transaction.objectStore('ringtones');
+      const request = store.put({ id, blob, timestamp: Date.now() });
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(true);
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function loadCustomRingtoneFromIDB(id: string): Promise<Blob | null> {
+  try {
+    const db = await openIndexedDB();
+    if (!db) return null;
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(['ringtones'], 'readonly');
+      const store = transaction.objectStore('ringtones');
+      const request = store.get(id);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result?.blob ?? null);
+    });
+  } catch {
+    return null;
+  }
+}
 
 function getDeviceKind(): DeviceKind {
   if (typeof window === 'undefined') {
@@ -93,12 +182,13 @@ function formatParts(timeZone: string): ClockParts {
   const second = Number(byType.get('second') ?? '0');
   const dayName = byType.get('weekday') ?? 'Now';
   const dateLabel = `${byType.get('month') ?? ''} ${byType.get('day') ?? ''}`.trim();
-  const zoneName = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    timeZoneName: 'short',
-  })
-    .formatToParts(now)
-    .find((part) => part.type === 'timeZoneName')?.value ?? timeZone;
+  const zoneName =
+    new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      timeZoneName: 'short',
+    })
+      .formatToParts(now)
+      .find((part) => part.type === 'timeZoneName')?.value ?? timeZone;
 
   return { hour, minute, second, dayName, dateLabel, zoneName };
 }
@@ -122,23 +212,23 @@ function getDateKeyInTimeZone(timeZone: string): string {
   return `${year}-${month}-${day}`;
 }
 
-function playAlertTone() {
-  try {
-    const audioContext = new AudioContext();
-    const oscillator = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    oscillator.type = 'sine';
-    oscillator.frequency.value = 880;
-    gain.gain.value = 0.0001;
-    oscillator.connect(gain);
-    gain.connect(audioContext.destination);
-    oscillator.start();
-    gain.gain.exponentialRampToValueAtTime(0.2, audioContext.currentTime + 0.05);
-    gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.9);
-    oscillator.stop(audioContext.currentTime + 1);
-  } catch {
-    // Ignore audio failures in restrictive browsers.
-  }
+function clampMinutes(hours: number, minutes: number): number {
+  const safeHours = Math.max(0, Math.min(24, Math.floor(hours)));
+  const safeMinutes = safeHours === 24 ? 0 : Math.max(0, Math.min(59, Math.floor(minutes)));
+  const combined = safeHours * 60 + safeMinutes;
+  return Math.max(1, Math.min(1440, combined));
+}
+
+function splitMinutes(totalMinutes: number) {
+  const safe = Math.max(1, Math.min(1440, Math.floor(totalMinutes)));
+  const hours = Math.floor(safe / 60);
+  const minutes = safe % 60;
+  return { hours, minutes };
+}
+
+function playPresetTone(preset: Exclude<RingtoneChoice, 'custom'>) {
+  stopCurrentAudio();
+  void playRingtone(preset);
 }
 
 function App() {
@@ -152,28 +242,50 @@ function App() {
   const [locationQuery, setLocationQuery] = useState('');
   const [locationMessage, setLocationMessage] = useState('');
   const [nowTick, setNowTick] = useState(Date.now());
+
   const [alarms, setAlarms] = useState<Alarm[]>([]);
   const [alarmTime, setAlarmTime] = useState('07:00');
   const [alarmLabel, setAlarmLabel] = useState('Morning alarm');
   const [alarmRepeatDays, setAlarmRepeatDays] = useState<number[]>([1, 2, 3, 4, 5]);
+  const [editingAlarmId, setEditingAlarmId] = useState<string | null>(null);
+
+  const [timers, setTimers] = useState<TaggedTimer[]>([]);
+  const [timerLabel, setTimerLabel] = useState('Study focus');
+  const [timerHours, setTimerHours] = useState(0);
+  const [timerMinutes, setTimerMinutes] = useState(30);
+  const [editingTimerId, setEditingTimerId] = useState<string | null>(null);
+
   const [stopwatchRunning, setStopwatchRunning] = useState(false);
   const [stopwatchStart, setStopwatchStart] = useState<number | null>(null);
   const [stopwatchElapsed, setStopwatchElapsed] = useState(0);
   const [stopwatchLaps, setStopwatchLaps] = useState<StopwatchLap[]>([]);
-  const [sleepMinutes, setSleepMinutes] = useState(25);
+
+  const [sleepDurationMinutes, setSleepDurationMinutes] = useState(25);
+  const [sleepHours, setSleepHours] = useState(0);
+  const [sleepMinutesPart, setSleepMinutesPart] = useState(25);
   const [sleepTimer, setSleepTimer] = useState<SleepTimerState>({
     active: false,
     durationMinutes: 25,
     startedAt: null,
     endsAt: null,
   });
+
+  const [ringtoneChoice, setRingtoneChoice] = useState<RingtoneChoice>('pulse');
+  const [customRingtoneId, setCustomRingtoneId] = useState<string | null>(null);
+  const [customRingtoneName, setCustomRingtoneName] = useState('');
+  const [customRingtoneUrl, setCustomRingtoneUrl] = useState<string | null>(null);
+  const [appMode, setAppMode] = useState('browser');
+
   const [worldClocks, setWorldClocks] = useState<SavedLocation[]>([]);
   const [worldQuery, setWorldQuery] = useState('');
   const [notifyGranted, setNotifyGranted] = useState(Notification.permission === 'granted');
   const sleepFireRef = useRef(false);
+  const customAudioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     const updateDevice = () => setDeviceKind(getDeviceKind());
+    const installed = isAppInstalled();
+    setAppMode(installed ? 'installed' : 'browser');
     window.addEventListener('resize', updateDevice);
     window.addEventListener('orientationchange', updateDevice);
     return () => {
@@ -184,6 +296,7 @@ function App() {
 
   useEffect(() => {
     const savedAlarms = window.localStorage.getItem(storageKeys.alarms);
+    const savedTimers = window.localStorage.getItem(storageKeys.timers);
     const savedWorlds = window.localStorage.getItem(storageKeys.worlds);
     const savedSettings = window.localStorage.getItem(storageKeys.settings);
 
@@ -192,6 +305,14 @@ function App() {
         setAlarms(JSON.parse(savedAlarms) as Alarm[]);
       } catch {
         window.localStorage.removeItem(storageKeys.alarms);
+      }
+    }
+
+    if (savedTimers) {
+      try {
+        setTimers(JSON.parse(savedTimers) as TaggedTimer[]);
+      } catch {
+        window.localStorage.removeItem(storageKeys.timers);
       }
     }
 
@@ -205,7 +326,16 @@ function App() {
 
     if (savedSettings) {
       try {
-        const parsed = JSON.parse(savedSettings) as { locationLabel?: string; timeZone?: string; source?: LocationSource; latitude?: number; longitude?: number };
+        const parsed = JSON.parse(savedSettings) as {
+          locationLabel?: string;
+          timeZone?: string;
+          source?: LocationSource;
+          latitude?: number;
+          longitude?: number;
+          ringtoneChoice?: RingtoneChoice;
+          customRingtoneId?: string;
+          customRingtoneName?: string;
+        };
         if (parsed.locationLabel) {
           setLocationLabel(parsed.locationLabel);
         }
@@ -221,6 +351,15 @@ function App() {
         if (typeof parsed.longitude === 'number') {
           setLongitude(parsed.longitude);
         }
+        if (parsed.ringtoneChoice) {
+          setRingtoneChoice(parsed.ringtoneChoice);
+        }
+        if (parsed.customRingtoneId) {
+          setCustomRingtoneId(parsed.customRingtoneId);
+        }
+        if (parsed.customRingtoneName) {
+          setCustomRingtoneName(parsed.customRingtoneName);
+        }
       } catch {
         window.localStorage.removeItem(storageKeys.settings);
       }
@@ -234,13 +373,20 @@ function App() {
       source: locationSource,
       latitude,
       longitude,
+      ringtoneChoice,
+      customRingtoneId,
+      customRingtoneName,
     };
     window.localStorage.setItem(storageKeys.settings, JSON.stringify(snapshot));
-  }, [locationLabel, timeZone, locationSource, latitude, longitude]);
+  }, [locationLabel, timeZone, locationSource, latitude, longitude, ringtoneChoice, customRingtoneId, customRingtoneName]);
 
   useEffect(() => {
     window.localStorage.setItem(storageKeys.alarms, JSON.stringify(alarms));
   }, [alarms]);
+
+  useEffect(() => {
+    window.localStorage.setItem(storageKeys.timers, JSON.stringify(timers));
+  }, [timers]);
 
   useEffect(() => {
     window.localStorage.setItem(storageKeys.worlds, JSON.stringify(worldClocks));
@@ -272,24 +418,21 @@ function App() {
           setSleepTimer((current) => ({ ...current, active: false, startedAt: null, endsAt: null }));
           setActiveTab('sleep');
           fireAlert('Sleep timer complete', 'Your sleep timer has finished.');
-          playAlertTone();
+          playConfiguredRingtone();
         }
       }, 500);
       return () => window.clearInterval(timer);
     }
     sleepFireRef.current = false;
     return undefined;
-  }, [sleepTimer.active, sleepTimer.endsAt]);
+  }, [sleepTimer.active, sleepTimer.endsAt, ringtoneChoice, customRingtoneId]);
 
   useEffect(() => {
     const currentParts = formatParts(timeZone);
     const currentDateKey = getDateKeyInTimeZone(timeZone);
 
     alarms.forEach((alarm) => {
-      if (!alarm.enabled) {
-        return;
-      }
-      if (alarm.lastTriggered === currentDateKey) {
+      if (!alarm.enabled || alarm.lastTriggered === currentDateKey) {
         return;
       }
 
@@ -306,15 +449,49 @@ function App() {
 
       setAlarms((current) => current.map((entry) => (entry.id === alarm.id ? { ...entry, lastTriggered: currentDateKey } : entry)));
       fireAlert('Alarm ringing', alarm.label || 'Alarm');
-      playAlertTone();
+      playConfiguredRingtone();
     });
-  }, [alarms, timeZone, nowTick]);
+  }, [alarms, timeZone, nowTick, ringtoneChoice, customRingtoneId]);
+
+  useEffect(() => {
+    setTimers((current) => {
+      let changed = false;
+      const now = Date.now();
+      const next = current.map((timer) => {
+        if (!timer.active || timer.endsAt === null) {
+          return timer;
+        }
+
+        const remaining = Math.max(timer.endsAt - now, 0);
+        if (remaining === 0) {
+          changed = true;
+          fireAlert('Timer complete', `${timer.label} is complete.`);
+          playConfiguredRingtone();
+          return {
+            ...timer,
+            active: false,
+            endsAt: null,
+            remainingMs: timer.durationMinutes * 60_000,
+          };
+        }
+
+        if (remaining !== timer.remainingMs) {
+          changed = true;
+          return { ...timer, remainingMs: remaining };
+        }
+
+        return timer;
+      });
+
+      return changed ? next : current;
+    });
+  }, [nowTick, ringtoneChoice, customRingtoneId]);
 
   useEffect(() => {
     if (deviceKind === 'phone' && navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
-          resolveCoordinates(position.coords.latitude, position.coords.longitude, 'automatic');
+          void resolveCoordinates(position.coords.latitude, position.coords.longitude, 'automatic');
         },
         () => {
           setLocationSource('manual');
@@ -336,22 +513,45 @@ function App() {
   }, []);
 
   const currentClock = formatParts(timeZone);
-  const clockAngles = {
-    hour: currentClock.hour % 12,
-    minute: currentClock.minute,
-    second: currentClock.second,
-  };
-  const hourRotation = clockAngles.hour * 30 + clockAngles.minute * 0.5;
-  const minuteRotation = clockAngles.minute * 6 + clockAngles.second * 0.1;
-  const secondRotation = clockAngles.second * 6;
+  const hourRotation = (currentClock.hour % 12) * 30 + currentClock.minute * 0.5;
+  const minuteRotation = currentClock.minute * 6 + currentClock.second * 0.1;
+  const secondRotation = currentClock.second * 6;
   const stopwatchDisplay = formatDuration(stopwatchElapsed);
-  const sleepRemaining = sleepTimer.active && sleepTimer.endsAt !== null ? Math.max(sleepTimer.endsAt - Date.now(), 0) : sleepMinutes * 60 * 1000;
+  const sleepRemaining =
+    sleepTimer.active && sleepTimer.endsAt !== null
+      ? Math.max(sleepTimer.endsAt - Date.now(), 0)
+      : sleepDurationMinutes * 60 * 1000;
 
   const setAlarmDay = (day: number) => {
     setAlarmRepeatDays((current) =>
       current.includes(day) ? current.filter((entry) => entry !== day) : [...current, day].sort((left, right) => left - right),
     );
   };
+
+  function playConfiguredRingtone() {
+    stopCurrentAudio();
+
+    if (ringtoneChoice === 'custom' && customRingtoneUrl) {
+      if (customAudioRef.current) {
+        customAudioRef.current.pause();
+        customAudioRef.current.currentTime = 0;
+      }
+      const customTone = new Audio(customRingtoneUrl);
+      customAudioRef.current = customTone;
+      customTone.volume = 0.5;
+      void customTone.play().catch(() => {
+        void playRingtone('pulse');
+      });
+      return;
+    }
+
+    if (ringtoneChoice === 'custom') {
+      void playRingtone('pulse');
+      return;
+    }
+
+    void playRingtone(ringtoneChoice as Exclude<RingtoneChoice, 'custom'>);
+  }
 
   async function resolveCoordinates(lat: number, lon: number, source: LocationSource) {
     const resolvedZone = tzlookup(lat, lon);
@@ -424,7 +624,32 @@ function App() {
     }
   }
 
-  function addAlarm() {
+  function resetAlarmForm() {
+    setEditingAlarmId(null);
+    setAlarmLabel('Morning alarm');
+    setAlarmTime('07:00');
+    setAlarmRepeatDays([1, 2, 3, 4, 5]);
+  }
+
+  function submitAlarm() {
+    if (editingAlarmId) {
+      setAlarms((current) =>
+        current.map((alarm) =>
+          alarm.id === editingAlarmId
+            ? {
+                ...alarm,
+                time: alarmTime,
+                label: alarmLabel.trim() || 'Alarm',
+                repeatDays: alarmRepeatDays,
+                lastTriggered: null,
+              }
+            : alarm,
+        ),
+      );
+      resetAlarmForm();
+      return;
+    }
+
     setAlarms((current) => [
       {
         id: makeId('alarm'),
@@ -436,9 +661,14 @@ function App() {
       },
       ...current,
     ]);
-    setAlarmLabel('Morning alarm');
-    setAlarmTime('07:00');
-    setAlarmRepeatDays([1, 2, 3, 4, 5]);
+    resetAlarmForm();
+  }
+
+  function startEditingAlarm(alarm: Alarm) {
+    setEditingAlarmId(alarm.id);
+    setAlarmTime(alarm.time);
+    setAlarmLabel(alarm.label);
+    setAlarmRepeatDays(alarm.repeatDays);
   }
 
   function toggleAlarm(id: string) {
@@ -447,6 +677,100 @@ function App() {
 
   function deleteAlarm(id: string) {
     setAlarms((current) => current.filter((alarm) => alarm.id !== id));
+    if (editingAlarmId === id) {
+      resetAlarmForm();
+    }
+  }
+
+  function setTimerDuration(hours: number, minutes: number) {
+    const totalMinutes = clampMinutes(hours, minutes);
+    const split = splitMinutes(totalMinutes);
+    setTimerHours(split.hours);
+    setTimerMinutes(split.minutes);
+  }
+
+  function resetTimerForm() {
+    setEditingTimerId(null);
+    setTimerLabel('Study focus');
+    setTimerDuration(0, 30);
+  }
+
+  function submitTimer() {
+    const durationMinutes = clampMinutes(timerHours, timerMinutes);
+
+    if (editingTimerId) {
+      setTimers((current) =>
+        current.map((timer) =>
+          timer.id === editingTimerId
+            ? {
+                ...timer,
+                label: timerLabel.trim() || 'Tagged timer',
+                durationMinutes,
+                remainingMs: durationMinutes * 60_000,
+                active: false,
+                endsAt: null,
+              }
+            : timer,
+        ),
+      );
+      resetTimerForm();
+      return;
+    }
+
+    setTimers((current) => [
+      {
+        id: makeId('timer'),
+        label: timerLabel.trim() || 'Tagged timer',
+        durationMinutes,
+        remainingMs: durationMinutes * 60_000,
+        active: false,
+        endsAt: null,
+      },
+      ...current,
+    ]);
+    resetTimerForm();
+  }
+
+  function startEditingTimer(timer: TaggedTimer) {
+    setEditingTimerId(timer.id);
+    setTimerLabel(timer.label);
+    const split = splitMinutes(timer.durationMinutes);
+    setTimerHours(split.hours);
+    setTimerMinutes(split.minutes);
+  }
+
+  function toggleTimer(id: string) {
+    setTimers((current) =>
+      current.map((timer) => {
+        if (timer.id !== id) {
+          return timer;
+        }
+
+        if (timer.active && timer.endsAt !== null) {
+          return {
+            ...timer,
+            active: false,
+            endsAt: null,
+            remainingMs: Math.max(timer.endsAt - Date.now(), 0),
+          };
+        }
+
+        const resumeMs = timer.remainingMs > 0 ? timer.remainingMs : timer.durationMinutes * 60_000;
+        return {
+          ...timer,
+          active: true,
+          endsAt: Date.now() + resumeMs,
+          remainingMs: resumeMs,
+        };
+      }),
+    );
+  }
+
+  function removeTimer(id: string) {
+    setTimers((current) => current.filter((timer) => timer.id !== id));
+    if (editingTimerId === id) {
+      resetTimerForm();
+    }
   }
 
   function startStopwatch() {
@@ -480,11 +804,20 @@ function App() {
     ]);
   }
 
+  function setSleepDuration(hours: number, minutes: number) {
+    const nextMinutes = clampMinutes(hours, minutes);
+    const split = splitMinutes(nextMinutes);
+    setSleepHours(split.hours);
+    setSleepMinutesPart(split.minutes);
+    setSleepDurationMinutes(nextMinutes);
+    setSleepTimer((current) => ({ ...current, durationMinutes: nextMinutes }));
+  }
+
   function startSleepTimer() {
-    const durationMs = sleepMinutes * 60 * 1000;
+    const durationMs = sleepDurationMinutes * 60 * 1000;
     setSleepTimer({
       active: true,
-      durationMinutes: sleepMinutes,
+      durationMinutes: sleepDurationMinutes,
       startedAt: Date.now(),
       endsAt: Date.now() + durationMs,
     });
@@ -492,7 +825,7 @@ function App() {
   }
 
   function cancelSleepTimer() {
-    setSleepTimer({ active: false, durationMinutes: sleepMinutes, startedAt: null, endsAt: null });
+    setSleepTimer({ active: false, durationMinutes: sleepDurationMinutes, startedAt: null, endsAt: null });
     sleepFireRef.current = false;
   }
 
@@ -535,7 +868,85 @@ function App() {
     setWorldClocks((current) => current.filter((clock) => clock.id !== id));
   }
 
-  const clockCards = worldClocks.length > 0 ? worldClocks : [{ id: 'home', label: locationLabel, latitude: latitude ?? 0, longitude: longitude ?? 0, timeZone }];
+  function handleCustomRingtoneUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    // Size check: max 5MB
+    const maxSize = 5 * 1024 * 1024;
+    if (file.size > maxSize) {
+      setLocationMessage('Audio file too large. Maximum size is 5MB.');
+      return;
+    }
+
+    const ringtoneId = makeId('ringtone');
+
+    if (appMode === 'installed') {
+      // Use IndexedDB for installed PWA app
+      void (async () => {
+        try {
+          const saved = await saveCustomRingtoneToIDB(ringtoneId, file);
+          if (saved) {
+            setCustomRingtoneId(ringtoneId);
+            setCustomRingtoneName(file.name);
+            setRingtoneChoice('custom');
+            setLocationMessage(`Custom ringtone "${file.name}" saved successfully.`);
+          } else {
+            setLocationMessage('Failed to save ringtone. Try using a browser with IndexedDB support.');
+          }
+        } catch {
+          setLocationMessage('Error saving custom ringtone. Please try again.');
+        }
+      })();
+    } else {
+      // Use data URL for browser mode (smaller file, single session)
+      const reader = new FileReader();
+      reader.onerror = () => {
+        setLocationMessage('Failed to read audio file. Please try again.');
+      };
+      reader.onload = () => {
+        const result = reader.result;
+        if (typeof result === 'string') {
+          try {
+            setCustomRingtoneUrl(result);
+            setCustomRingtoneId(ringtoneId);
+            setCustomRingtoneName(file.name);
+            setRingtoneChoice('custom');
+            setLocationMessage(`Custom ringtone "${file.name}" loaded for this session.`);
+          } catch {
+            setLocationMessage('Error loading ringtone. File may be too large for browser storage.');
+          }
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  }
+
+  // Load custom ringtone from IDB when customRingtoneId changes (app-installed mode)
+  useEffect(() => {
+    if (appMode !== 'installed' || !customRingtoneId) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const blob = await loadCustomRingtoneFromIDB(customRingtoneId);
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          setCustomRingtoneUrl(url);
+        }
+      } catch {
+        // Silently fail - fallback to preset
+      }
+    })();
+  }, [customRingtoneId, appMode]);
+
+  const clockCards =
+    worldClocks.length > 0
+      ? worldClocks
+      : [{ id: 'home', label: locationLabel, latitude: latitude ?? 0, longitude: longitude ?? 0, timeZone }];
 
   return (
     <div className={`shell ${deviceKind}`}>
@@ -546,7 +957,7 @@ function App() {
           <p className="eyebrow">Pulse Clock</p>
           <h1>Time that follows the person, not the machine.</h1>
           <p className="lede">
-            A polished clock suite for phone and desktop with automatic location on mobile and manual location on larger screens.
+            A polished clock suite for phone and desktop with automatic location on mobile, custom ringtones, tagged timers, and editable alarms.
           </p>
         </div>
         <div className="status-card">
@@ -558,12 +969,7 @@ function App() {
 
       <nav className="tabs" aria-label="Clock sections">
         {tabs.map((tab) => (
-          <button
-            key={tab.key}
-            className={activeTab === tab.key ? 'tab active' : 'tab'}
-            onClick={() => setActiveTab(tab.key)}
-            type="button"
-          >
+          <button key={tab.key} className={activeTab === tab.key ? 'tab active' : 'tab'} onClick={() => setActiveTab(tab.key)} type="button">
             <span>{tab.label}</span>
             <small>{tab.hint}</small>
           </button>
@@ -585,7 +991,9 @@ function App() {
               <div className="subgrid">
                 <div>
                   <span>Date</span>
-                  <strong>{currentClock.dayName}, {currentClock.dateLabel}</strong>
+                  <strong>
+                    {currentClock.dayName}, {currentClock.dateLabel}
+                  </strong>
                 </div>
                 <div>
                   <span>Coordinates</span>
@@ -611,14 +1019,14 @@ function App() {
           <section className="panel split-panel">
             <div>
               <p className="panel-tag">Alarm studio</p>
-              <h2>Wake-ups, repeats, and labels</h2>
+              <h2>Wake-ups, repeats, labels, and edits</h2>
               <div className="form-grid">
                 <label>
                   Alarm time
                   <input type="time" value={alarmTime} onChange={(event) => setAlarmTime(event.target.value)} />
                 </label>
                 <label>
-                  Label
+                  Label / tag name
                   <input value={alarmLabel} onChange={(event) => setAlarmLabel(event.target.value)} placeholder="Morning run" />
                 </label>
               </div>
@@ -635,9 +1043,14 @@ function App() {
                 ))}
               </div>
               <div className="action-row">
-                <button className="primary-button" type="button" onClick={addAlarm}>
-                  Add alarm
+                <button className="primary-button" type="button" onClick={submitAlarm}>
+                  {editingAlarmId ? 'Save changes' : 'Add alarm'}
                 </button>
+                {editingAlarmId && (
+                  <button className="secondary-button" type="button" onClick={resetAlarmForm}>
+                    Cancel edit
+                  </button>
+                )}
                 <button className="secondary-button" type="button" onClick={requestNotificationAccess}>
                   {notifyGranted ? 'Notifications enabled' : 'Enable notifications'}
                 </button>
@@ -651,6 +1064,9 @@ function App() {
                       <p>{alarm.time} · {alarm.repeatDays.length === 0 ? 'One-time' : alarm.repeatDays.map((day) => weekdayLabels[day]).join(', ')}</p>
                     </div>
                     <div className="list-actions">
+                      <button type="button" className="ghost-button" onClick={() => startEditingAlarm(alarm)}>
+                        Edit
+                      </button>
                       <button type="button" className="ghost-button" onClick={() => toggleAlarm(alarm.id)}>
                         {alarm.enabled ? 'On' : 'Off'}
                       </button>
@@ -664,8 +1080,82 @@ function App() {
             </div>
             <div className="info-panel">
               <h3>Alarm behavior</h3>
-              <p>Alarms are checked against the selected location timezone, so the ring follows the person’s current place.</p>
-              <p>On phones, the app asks for GPS access. On desktop, type a city or region instead.</p>
+              <p>All alarms follow your selected timezone and use your chosen ringtone, including custom uploaded audio.</p>
+              <p>Edit mode lets you quickly update a tag, time, or repeat days without removing the alarm first.</p>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'timer' && (
+          <section className="panel split-panel">
+            <div>
+              <p className="panel-tag">Tagged timer</p>
+              <h2>Named countdown timers with edit controls</h2>
+              <div className="form-grid">
+                <label>
+                  Timer tag name
+                  <input value={timerLabel} onChange={(event) => setTimerLabel(event.target.value)} placeholder="Workout set" />
+                </label>
+                <label>
+                  Duration (24-hour range)
+                  <div className="time-picker-row">
+                    <input
+                      type="number"
+                      min="0"
+                      max="24"
+                      value={timerHours}
+                      onChange={(event) => setTimerDuration(Number(event.target.value), timerMinutes)}
+                    />
+                    <span>:</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={timerHours === 24 ? '0' : '59'}
+                      value={timerMinutes}
+                      onChange={(event) => setTimerDuration(timerHours, Number(event.target.value))}
+                    />
+                  </div>
+                </label>
+              </div>
+              <div className="action-row">
+                <button className="primary-button" type="button" onClick={submitTimer}>
+                  {editingTimerId ? 'Save timer' : 'Add timer'}
+                </button>
+                {editingTimerId && (
+                  <button className="secondary-button" type="button" onClick={resetTimerForm}>
+                    Cancel edit
+                  </button>
+                )}
+              </div>
+              <div className="list-stack">
+                {timers.length === 0 && <p className="empty-state">No tagged timers yet. Create one above.</p>}
+                {timers.map((timer) => (
+                  <article className="list-card" key={timer.id}>
+                    <div>
+                      <strong>{timer.label}</strong>
+                      <p>
+                        Total: {formatHourMinute(timer.durationMinutes)} · Remaining: {formatDuration(timer.remainingMs)}
+                      </p>
+                    </div>
+                    <div className="list-actions">
+                      <button type="button" className="ghost-button" onClick={() => startEditingTimer(timer)}>
+                        Edit
+                      </button>
+                      <button type="button" className="ghost-button" onClick={() => toggleTimer(timer.id)}>
+                        {timer.active ? 'Off' : 'On'}
+                      </button>
+                      <button type="button" className="ghost-button danger" onClick={() => removeTimer(timer.id)}>
+                        Remove
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+            <div className="info-panel">
+              <h3>Timer notes</h3>
+              <p>Each timer keeps a clear tag name, has On/Off control, and can be edited any time.</p>
+              <p>Completion alerts use the same selected ringtone as alarms and sleep timers.</p>
             </div>
           </section>
         )}
@@ -700,7 +1190,7 @@ function App() {
             <div className="info-panel">
               <h3>Built for phone and desktop</h3>
               <p>The stopwatch stays responsive and uses fine-grained updates while running, then idles when paused.</p>
-              <p>It keeps lap times locally so the session is preserved while the page stays open.</p>
+              <p>It keeps lap times locally so your session is preserved while the page stays open.</p>
             </div>
           </section>
         )}
@@ -709,19 +1199,28 @@ function App() {
           <section className="panel split-panel">
             <div>
               <p className="panel-tag">Sleep timer</p>
-              <h2>Countdown to rest mode</h2>
+              <h2>24-hour sleep countdown</h2>
               <div className="form-grid compact">
                 <label>
-                  Minutes
-                  <input
-                    type="range"
-                    min="5"
-                    max="180"
-                    step="5"
-                    value={sleepMinutes}
-                    onChange={(event) => setSleepMinutes(Number(event.target.value))}
-                  />
-                  <span className="range-label">{sleepMinutes} minutes</span>
+                  Duration (HH:MM up to 24:00)
+                  <div className="time-picker-row">
+                    <input
+                      type="number"
+                      min="0"
+                      max="24"
+                      value={sleepHours}
+                      onChange={(event) => setSleepDuration(Number(event.target.value), sleepMinutesPart)}
+                    />
+                    <span>:</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={sleepHours === 24 ? '0' : '59'}
+                      value={sleepMinutesPart}
+                      onChange={(event) => setSleepDuration(sleepHours, Number(event.target.value))}
+                    />
+                  </div>
+                  <span className="range-label">Selected: {formatHourMinute(sleepDurationMinutes)}</span>
                 </label>
               </div>
               <div className="digital-time large">{formatDuration(sleepRemaining)}</div>
@@ -734,13 +1233,13 @@ function App() {
                 </button>
               </div>
               <p className="helper-text">
-                When the countdown finishes, the app triggers a notification, vibration if available, and a soft tone.
+                When the countdown finishes, the app triggers a notification, vibration if available, and your selected ringtone.
               </p>
             </div>
             <div className="info-panel">
               <h3>Sleep helper</h3>
-              <p>Useful for music, meditation, or winding down. It is local to the device and requires no account.</p>
-              <p>Timer length is adjustable from five minutes up to three hours.</p>
+              <p>The timer now supports a full 24-hour range so long sessions and overnight cutoff schedules are easy to set.</p>
+              <p>Pick your own sound profile in Settings, including custom uploaded audio.</p>
             </div>
           </section>
         )}
@@ -751,11 +1250,7 @@ function App() {
               <p className="panel-tag">World clock</p>
               <h2>Keep a few cities in view</h2>
               <div className="search-row">
-                <input
-                  placeholder="Search a city, country, or region"
-                  value={worldQuery}
-                  onChange={(event) => setWorldQuery(event.target.value)}
-                />
+                <input placeholder="Search a city, country, or region" value={worldQuery} onChange={(event) => setWorldQuery(event.target.value)} />
                 <button type="button" className="primary-button" onClick={addWorldClock}>
                   Add city
                 </button>
@@ -770,7 +1265,9 @@ function App() {
                         <p>{clock.timeZone}</p>
                       </div>
                       <div className="world-time">
-                        <span>{pad(parts.hour)}:{pad(parts.minute)}</span>
+                        <span>
+                          {pad(parts.hour)}:{pad(parts.minute)}
+                        </span>
                         <small>{parts.dayName}</small>
                       </div>
                       {clock.id !== 'home' && (
@@ -795,7 +1292,7 @@ function App() {
           <section className="panel split-panel">
             <div>
               <p className="panel-tag">Settings</p>
-              <h2>Device-aware location handling</h2>
+              <h2>Device-aware location + ringtone controls</h2>
               <div className="info-grid">
                 <div className="info-card">
                   <span>Device</span>
@@ -813,12 +1310,34 @@ function App() {
                   <p>{locationLabel}</p>
                 </div>
               </div>
+
+              <div className="form-grid">
+                <label>
+                  Default ringtone
+                  <select value={ringtoneChoice} onChange={(event) => setRingtoneChoice(event.target.value as RingtoneChoice)}>
+                    {ringtoneList.map((ringtone) => (
+                      <option key={ringtone.value} value={ringtone.value}>
+                        {ringtone.label}
+                      </option>
+                    ))}
+                    <option value="custom">Custom upload</option>
+                  </select>
+                </label>
+                <label>
+                  Custom ringtone file (max 5MB)
+                  <input type="file" accept="audio/*" onChange={handleCustomRingtoneUpload} />
+                  <span className="range-label">{customRingtoneName ? `Loaded: ${customRingtoneName}` : 'No custom file yet.'}</span>
+                </label>
+              </div>
+
+              <div className="action-row">
+                <button type="button" className="secondary-button" onClick={playConfiguredRingtone}>
+                  Preview ringtone
+                </button>
+              </div>
+
               <div className="search-row">
-                <input
-                  placeholder="Manual location search"
-                  value={locationQuery}
-                  onChange={(event) => setLocationQuery(event.target.value)}
-                />
+                <input placeholder="Manual location search" value={locationQuery} onChange={(event) => setLocationQuery(event.target.value)} />
                 <button type="button" className="primary-button" onClick={searchLocation}>
                   Set location
                 </button>
@@ -826,9 +1345,52 @@ function App() {
               <p className="helper-text">{locationMessage || 'Use the search box to set your place, then all clocks update instantly.'}</p>
             </div>
             <div className="info-panel">
-              <h3>Cross-platform behavior</h3>
-              <p>The app adapts its layout to coarse pointer devices, smaller screens, and browser support for notifications and vibration.</p>
-              <p>It works on Linux, Windows, Android, and other systems through the browser.</p>
+              <h3>Sound integration</h3>
+              <p>The ringtone you choose here is shared by alarms, tagged timers, and the sleep timer.</p>
+              <p>
+                {appMode === 'installed'
+                  ? 'Running as installed app – custom ringtones are stored in local database.'
+                  : 'Running in browser – custom ringtones are stored for this session only.'}
+              </p>
+            </div>
+          </section>
+        )}
+
+        {activeTab === 'developer' && (
+          <section className="panel split-panel">
+            <div>
+              <p className="panel-tag">Developer</p>
+              <h2>Shaik Rehan Ali</h2>
+              <p className="helper-text">
+                Student at G Pulla Reddy Degree and PG College, pursuing BSC MSCS.
+              </p>
+              <div className="list-stack">
+                <article className="list-card">
+                  <div>
+                    <strong>Creator profile</strong>
+                    <p>Shaik Rehan Ali, a focused builder with a sharp product mindset and a clean execution style.</p>
+                  </div>
+                </article>
+                <article className="list-card">
+                  <div>
+                    <strong>Academic track</strong>
+                    <p>BSC MSCS at G Pulla Reddy Degree and PG College, with strong dedication to practical software skills.</p>
+                  </div>
+                </article>
+                <article className="list-card">
+                  <div>
+                    <strong>Extra spotlight</strong>
+                    <p>
+                      Known for ambitious ideas, relentless consistency, and the confidence to turn small projects into standout experiences.
+                    </p>
+                  </div>
+                </article>
+              </div>
+            </div>
+            <div className="info-panel">
+              <h3>Signature</h3>
+              <p>This clock suite proudly carries the name and journey of Shaik Rehan Ali.</p>
+              <p>A student developer with high momentum, strong curiosity, and next-level growth potential.</p>
             </div>
           </section>
         )}
@@ -849,6 +1411,11 @@ function formatDuration(totalMs: number) {
   }
 
   return `${pad(minutes)}:${pad(seconds)}.${tenths}`;
+}
+
+function formatHourMinute(totalMinutes: number) {
+  const split = splitMinutes(totalMinutes);
+  return `${pad(split.hours)}:${pad(split.minutes)}`;
 }
 
 export default App;
