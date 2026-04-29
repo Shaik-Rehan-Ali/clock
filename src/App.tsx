@@ -1,6 +1,6 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react';
 import tzlookup from 'tz-lookup';
-import { playRingtone, ringtoneList } from './ringtones';
+import { playRingtone, ringtoneList, stopCurrentAudio } from './ringtones';
 
 type TabKey = 'clock' | 'alarms' | 'timer' | 'stopwatch' | 'sleep' | 'world' | 'settings' | 'developer';
 type DeviceKind = 'phone' | 'computer';
@@ -1320,7 +1320,9 @@ function App() {
                         {ringtone.label}
                       </option>
                     ))}
-                    <option value="custom">Custom upload</option>
+                    <option value="custom" hidden>
+                      Custom upload
+                    </option>
                   </select>
                 </label>
                 <label>

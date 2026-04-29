@@ -86,7 +86,7 @@ async function generateRoosterSound(): Promise<AudioBuffer> {
     osc.frequency.setValueAtTime(freq, now + start);
     osc.frequency.exponentialRampToValueAtTime(freq * 0.6, now + start + duration);
     gain.gain.setValueAtTime(0.1, now + start);
-    gain.gain.exponentialRampToValueAtTime(0, now + start + duration);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + start + duration);
     osc.start(now + start);
     osc.stop(now + start + duration);
   });
@@ -154,7 +154,7 @@ async function generateMorningGlorySound(): Promise<AudioBuffer> {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, now + time);
     gain.gain.setValueAtTime(0.2, now + time);
-    gain.gain.exponentialRampToValueAtTime(0, now + time + duration);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + time + duration);
     osc.start(now + time);
     osc.stop(now + time + duration);
     time += duration + 0.1;
@@ -186,7 +186,7 @@ async function generateApexSound(): Promise<AudioBuffer> {
     osc.type = 'square';
     osc.frequency.setValueAtTime(freq, now + time);
     gain.gain.setValueAtTime(0.12, now + time);
-    gain.gain.exponentialRampToValueAtTime(0, now + time + 0.18);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + time + 0.18);
     osc.start(now + time);
     osc.stop(now + time + 0.18);
     time += 0.25;
@@ -218,7 +218,7 @@ async function generateDigitalPhoneSound(): Promise<AudioBuffer> {
       osc.type = 'sine';
       osc.frequency.setValueAtTime(freq, now + time);
       gain.gain.setValueAtTime(0.1, now + time);
-      gain.gain.exponentialRampToValueAtTime(0, now + time + 0.2);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + time + 0.2);
       osc.start(now + time);
       osc.stop(now + time + 0.2);
     });
@@ -253,7 +253,7 @@ async function generateClassicClockSound(): Promise<AudioBuffer> {
     osc.frequency.setValueAtTime(freq, now + time);
     osc.frequency.exponentialRampToValueAtTime(freq * 0.7, now + time + 0.3);
     gain.gain.setValueAtTime(0.2, now + time);
-    gain.gain.exponentialRampToValueAtTime(0, now + time + 0.35);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + time + 0.35);
     osc.start(now + time);
     osc.stop(now + time + 0.35);
     time += 0.45;
@@ -285,7 +285,7 @@ async function generateAlarm2010Sound(): Promise<AudioBuffer> {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, now + time);
     gain.gain.setValueAtTime(0.14, now + time);
-    gain.gain.exponentialRampToValueAtTime(0, now + time + 0.12);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + time + 0.12);
     osc.start(now + time);
     osc.stop(now + time + 0.12);
     time += 0.18;
@@ -317,7 +317,7 @@ async function generateBeaconSound(): Promise<AudioBuffer> {
     osc.type = 'triangle';
     osc.frequency.setValueAtTime(freq, now + time);
     gain.gain.setValueAtTime(0.12, now + time);
-    gain.gain.exponentialRampToValueAtTime(0, now + time + 0.2);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + time + 0.2);
     osc.start(now + time);
     osc.stop(now + time + 0.2);
     time += 0.28;
@@ -349,7 +349,7 @@ async function generateChimeSound(): Promise<AudioBuffer> {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, now + time);
     gain.gain.setValueAtTime(0.15, now + time);
-    gain.gain.exponentialRampToValueAtTime(0, now + time + 0.25);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + time + 0.25);
     osc.start(now + time);
     osc.stop(now + time + 0.25);
     time += 0.35;
@@ -381,7 +381,7 @@ async function generatePulseSound(): Promise<AudioBuffer> {
     osc.type = 'sine';
     osc.frequency.setValueAtTime(freq, now + time);
     gain.gain.setValueAtTime(0.15, now + time);
-    gain.gain.exponentialRampToValueAtTime(0, now + time + 0.22);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + time + 0.22);
     osc.start(now + time);
     osc.stop(now + time + 0.22);
     time += 0.32;
@@ -443,10 +443,32 @@ export async function getRingtoneBuffer(name: RingtoneName): Promise<AudioBuffer
 
     const promise = generator();
     ringtoneCache.set(name, promise);
-    return await promise;
-  } catch {
+
+    try {
+      return await promise;
+    } catch (error) {
+      // Do not keep failed generations cached forever.
+      ringtoneCache.delete(name);
+      throw error;
+    }
+  } catch (error) {
+    console.error(`Error generating ringtone: ${name}`, error);
     return null;
   }
+}
+
+function playFallbackBeep(audioContext: AudioContext): void {
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(880, audioContext.currentTime);
+  gain.gain.setValueAtTime(0.0001, audioContext.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.2, audioContext.currentTime + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audioContext.currentTime + 0.35);
+  oscillator.connect(gain);
+  gain.connect(audioContext.destination);
+  oscillator.start(audioContext.currentTime);
+  oscillator.stop(audioContext.currentTime + 0.36);
 }
 
 /**
@@ -454,14 +476,6 @@ export async function getRingtoneBuffer(name: RingtoneName): Promise<AudioBuffer
  */
 export async function playRingtone(name: RingtoneName): Promise<void> {
   try {
-    const buffer = await getRingtoneBuffer(name);
-    if (!buffer) {
-      console.warn(`Failed to generate ringtone: ${name}`);
-      return;
-    }
-
-    stopCurrentAudio();
-
     const audioContext = getAudioContext();
 
     // Resume context if suspended (required on some browsers)
@@ -469,11 +483,20 @@ export async function playRingtone(name: RingtoneName): Promise<void> {
       await audioContext.resume();
     }
 
+    const buffer = await getRingtoneBuffer(name);
+    if (!buffer) {
+      console.warn(`Failed to generate ringtone: ${name}; playing fallback beep`);
+      playFallbackBeep(audioContext);
+      return;
+    }
+
+    stopCurrentAudio();
+
     const source = audioContext.createBufferSource();
     source.buffer = buffer;
 
     const gain = audioContext.createGain();
-    gain.gain.setValueAtTime(0.5, audioContext.currentTime);
+    gain.gain.setValueAtTime(0.9, audioContext.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + buffer.duration - 0.1);
 
     source.connect(gain);
